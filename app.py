@@ -3,24 +3,24 @@ import fitz  # PyMuPDF
 import numpy as np
 import pandas as pd
 
-st.set_page_config(page_title="RIP Latino v7", layout="wide")
-st.title("🖨️ Calculador de Cubritividad Técnica")
-st.markdown("Análisis de chapas reales (CMYK + Pantones).")
+st.set_page_config(page_title="RIP de Bolsillo Pro", layout="wide")
+st.title("🖨️ Calculador de Cubritividad (CMYK + Pantones)")
+st.markdown("Herramienta técnica de alta precisión para preprensa.")
 
-uploaded_files = st.file_uploader("Subí tus PDFs", type="pdf", accept_multiple_files=True)
+uploaded_files = st.file_uploader("Subí tus PDFs aquí", type="pdf", accept_multiple_files=True)
 
 if uploaded_files:
-    if st.button("Ejecutar Análisis de Precisión", type="primary"):
+    if st.button("Calcular Cubritividad Real", type="primary"):
         for uploaded_file in uploaded_files:
             st.subheader(f"📄 Archivo: {uploaded_file.name}")
             
             try:
-                # 1. Cargar el documento
+                # 1. Cargar el documento de forma segura
                 file_bytes = uploaded_file.read()
                 doc = fitz.open(stream=file_bytes, filetype="pdf")
                 
                 if len(doc) == 0:
-                    st.error("Archivo vacío.")
+                    st.error("El archivo parece estar vacío o protegido.")
                     continue
 
                 resultados = []
@@ -28,58 +28,62 @@ if uploaded_files:
 
                 for page_num in range(len(doc)):
                     page = doc[page_num]
+                    # La fila de datos siempre empieza con la página
                     fila = {"Página": int(page_num + 1)}
 
-                    # 2. Detectar nombres de tintas
+                    # --- CMYK: RENDERIZADO DIRECTO ---
+                    # Renderizamos a 72 DPI para velocidad, espacio CMYK (4 canales)
+                    pix = page.get_pixmap(colorspace=fitz.csCMYK, dpi=72)
+                    img = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, 4)
+                    
+                    canales_cmyk = ["Cyan", "Magenta", "Yellow", "Black"]
+                    for i, nombre in enumerate(canales_cmyk):
+                        canal = img[:, :, i]
+                        # Contamos píxeles con tinta (valor > 2 para ignorar ruido)
+                        fila[nombre] = (np.count_nonzero(canal > 2) / canal.size) * 100
+
+                    # --- PANTONES: SEPARACIONES TÉCNICAS ---
                     try:
                         seps = page.get_separations()
-                        nombres_spot = [s[0] for s in seps]
+                        if seps:
+                            for i, sep in enumerate(seps):
+                                nombre_tinta = sep[0]
+                                # Renderizamos solo esa chapa de separación
+                                pix_s = page.get_pixmap(colorspace=fitz.csGRAY, separation=i, dpi=72)
+                                img_s = np.frombuffer(pix_s.samples, dtype=np.uint8)
+                                # En escala de grises, el negro (tinta) es valor bajo
+                                fila[nombre_tinta] = (np.count_nonzero(img_s < 250) / img_s.size) * 100
                     except:
-                        nombres_spot = []
-                    
-                    chapas_proceso = ["Cyan", "Magenta", "Yellow", "Black"]
-                    todas_las_chapas = chapas_proceso + nombres_spot
-
-                    # 3. Analizar cada canal
-                    for i, nombre in enumerate(todas_las_chapas):
-                        try:
-                            # Renderizamos la chapa específica
-                            pix = page.get_pixmap(
-                                colorspace=fitz.csGRAY, 
-                                separations=i, 
-                                dpi=72
-                            )
-                            img = np.frombuffer(pix.samples, dtype=np.uint8)
-                            
-                            # CÁLCULO DE DENSIDAD (Para evitar el 0% constante)
-                            # En preimpresión 255=Papel, 0=Tinta. 
-                            # Invertimos para obtener la carga real.
-                            carga_tinta = 255 - np.mean(img)
-                            porcentaje = (max(0, carga_tinta) / 255) * 100
-                            fila[nombre] = porcentaje
-                        except:
-                            fila[nombre] = 0.0
+                        pass # Si falla un Pantone, al menos tenemos el CMYK
 
                     resultados.append(fila)
                     bar.progress((page_num + 1) / len(doc))
 
-                # 4. Mostrar Resultados
-                if resultados:
-                    df = pd.DataFrame(resultados).fillna(0.0)
+                # --- PROCESAMIENTO DE LA TABLA ---
+                if len(resultados) > 0:
+                    # Convertimos a DataFrame y limpiamos
+                    df = pd.DataFrame(resultados)
                     
-                    # Ordenar columnas
-                    cols_presentes = [c for c in chapas_proceso if c in df.columns]
-                    cols_extra = [c for c in df.columns if c not in chapas_proceso and c != "Página"]
-                    df = df[["Página"] + cols_presentes + cols_extra]
-
-                    st.write("### 📊 Promedio por Tinta")
+                    # Reordenar columnas para que 'Página' esté primero
+                    columnas_fijas = ["Página", "Cyan", "Magenta", "Yellow", "Black"]
+                    # Buscamos qué Pantones se encontraron en total
+                    columnas_pantone = [c for c in df.columns if c not in columnas_fijas]
+                    
+                    # Armamos el orden final y llenamos huecos con 0.0
+                    orden_final = columnas_fijas + columnas_pantone
+                    df = df.reindex(columns=orden_final).fillna(0.0)
+                    
+                    # Mostrar Totales
+                    st.write("### 📊 Consumo Promedio")
                     resumen = df.drop(columns=["Página"]).mean().to_frame("Cubritividad (%)")
                     st.table(resumen.style.format("{:.2f}%"))
 
-                    st.write("### 📄 Detalle por Página")
+                    # Mostrar Detalle
+                    st.write("### 📄 Detalle por Pliego / Página")
+                    df["Página"] = df["Página"].astype(int)
                     st.dataframe(df.style.format({c: "{:.2f}%" for c in df.columns if c != "Página"}), use_container_width=True)
                 
                 st.divider()
 
             except Exception as e:
-                st.error(f"Error técnico: {e}")
+                st.error(f"Error en el proceso: {e}")
