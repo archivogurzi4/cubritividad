@@ -4,85 +4,86 @@ import numpy as np
 import pandas as pd
 
 st.set_page_config(page_title="RIP de Bolsillo Pro", layout="wide")
-st.title("🖨️ Calculador de Cubritividad Técnica")
-st.markdown("Análisis de separaciones reales para preprensa e imprenta.")
+st.title("🖨️ Calculador de Cubritividad (CMYK + Pantones)")
+st.markdown("Herramienta técnica de alta precisión para preprensa.")
 
 uploaded_files = st.file_uploader("Subí tus PDFs aquí", type="pdf", accept_multiple_files=True)
 
 if uploaded_files:
-    if st.button("Ejecutar Análisis de Chapas", type="primary"):
+    if st.button("Calcular Cubritividad Real", type="primary"):
         for uploaded_file in uploaded_files:
             st.subheader(f"📄 Archivo: {uploaded_file.name}")
             
             try:
-                # 1. Cargar documento
+                # 1. Cargar el documento de forma segura
                 file_bytes = uploaded_file.read()
                 doc = fitz.open(stream=file_bytes, filetype="pdf")
+                
+                if len(doc) == 0:
+                    st.error("El archivo parece estar vacío o protegido.")
+                    continue
+
                 resultados = []
                 bar = st.progress(0)
 
                 for page_num in range(len(doc)):
                     page = doc[page_num]
+                    # La fila de datos siempre empieza con la página
                     fila = {"Página": int(page_num + 1)}
 
-                    # --- GESTIÓN DE SEPARACIONES ---
-                    # Creamos el objeto de control de chapas
-                    seps = fitz.Separations(page)
-                    nombres_spot = [page.get_separations()[i][0] for i in range(len(page.get_separations()))]
+                    # --- CMYK: RENDERIZADO DIRECTO ---
+                    # Renderizamos a 72 DPI para velocidad, espacio CMYK (4 canales)
+                    pix = page.get_pixmap(colorspace=fitz.csCMYK, dpi=72)
+                    img = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, 4)
                     
-                    # --- PASO A: CMYK PROCESO (Sin contaminación de Pantones) ---
-                    # Desactivamos todos los Pantones para que no sumen al CMYK
-                    for i in range(4, seps.count):
-                        seps.set_status(i, 0) # 0 = Desactivado
+                    canales_cmyk = ["Cyan", "Magenta", "Yellow", "Black"]
+                    for i, nombre in enumerate(canales_cmyk):
+                        canal = img[:, :, i]
+                        # Contamos píxeles con tinta (valor > 2 para ignorar ruido)
+                        fila[nombre] = (np.count_nonzero(canal > 2) / canal.size) * 100
 
-                    # Renderizamos la página en CMYK usando solo las chapas de proceso
-                    pix_cmyk = page.get_pixmap(colorspace=fitz.csCMYK, separations=seps, dpi=72)
-                    img_cmyk = np.frombuffer(pix_cmyk.samples, dtype=np.uint8).reshape(pix_cmyk.height, pix_cmyk.width, 4)
-                    
-                    nombres_cmyk = ["Cyan", "Magenta", "Yellow", "Black"]
-                    for idx, nombre in enumerate(nombres_cmyk):
-                        canal = img_cmyk[:, :, idx]
-                        # Cálculo de cubritividad real por densidad de chapa
-                        fila[nombre] = (np.mean(canal) / 255) * 100
-
-                    # --- PASO B: PANTÓNES (Chapas independientes) ---
-                    for i in range(len(nombres_spot)):
-                        nombre_p = nombres_spot[i]
-                        # Creamos un render donde SOLO esté activo este Pantone
-                        seps_p = fitz.Separations(page)
-                        for j in range(seps_p.count):
-                            # Apagamos todo menos el Pantone actual (que empieza en el índice 4)
-                            seps_p.set_status(j, 1 if j == (i + 4) else 0)
-                        
-                        # Renderizamos en escala de grises para medir la chapa única
-                        pix_p = page.get_pixmap(colorspace=fitz.csGRAY, separations=seps_p, dpi=72)
-                        img_p = np.frombuffer(pix_p.samples, dtype=np.uint8)
-                        
-                        # En chapas individuales de PyMuPDF, el valor suele ser invertido (0=tinta)
-                        # Aplicamos corrección de polaridad si es necesario
-                        tinta_promedio = 255 - np.mean(img_p) 
-                        fila[nombre_p] = (max(0, tinta_promedio) / 255) * 100
+                    # --- PANTONES: SEPARACIONES TÉCNICAS ---
+                    try:
+                        seps = page.get_separations()
+                        if seps:
+                            for i, sep in enumerate(seps):
+                                nombre_tinta = sep[0]
+                                # Renderizamos solo esa chapa de separación
+                                pix_s = page.get_pixmap(colorspace=fitz.csGRAY, separation=i, dpi=72)
+                                img_s = np.frombuffer(pix_s.samples, dtype=np.uint8)
+                                # En escala de grises, el negro (tinta) es valor bajo
+                                fila[nombre_tinta] = (np.count_nonzero(img_s < 250) / img_s.size) * 100
+                    except:
+                        pass # Si falla un Pantone, al menos tenemos el CMYK
 
                     resultados.append(fila)
                     bar.progress((page_num + 1) / len(doc))
 
-                # --- MOSTRAR RESULTADOS ---
-                if resultados:
+                # --- PROCESAMIENTO DE LA TABLA ---
+                if len(resultados) > 0:
+                    # Convertimos a DataFrame y limpiamos
                     df = pd.DataFrame(resultados)
-                    # Limpieza y orden de columnas
-                    cols_fijas = ["Página", "Cyan", "Magenta", "Yellow", "Black"]
-                    cols_spots = [c for c in df.columns if c not in cols_fijas]
-                    df = df.reindex(columns=cols_fijas + cols_spots).fillna(0.0)
                     
-                    st.write("### 📊 Totales de Cubritividad (%)")
-                    resumen = df.drop(columns=["Página"]).mean().to_frame("Promedio Total")
+                    # Reordenar columnas para que 'Página' esté primero
+                    columnas_fijas = ["Página", "Cyan", "Magenta", "Yellow", "Black"]
+                    # Buscamos qué Pantones se encontraron en total
+                    columnas_pantone = [c for c in df.columns if c not in columnas_fijas]
+                    
+                    # Armamos el orden final y llenamos huecos con 0.0
+                    orden_final = columnas_fijas + columnas_pantone
+                    df = df.reindex(columns=orden_final).fillna(0.0)
+                    
+                    # Mostrar Totales
+                    st.write("### 📊 Consumo Promedio")
+                    resumen = df.drop(columns=["Página"]).mean().to_frame("Cubritividad (%)")
                     st.table(resumen.style.format("{:.2f}%"))
 
-                    st.write("### 📄 Desglose por Página")
+                    # Mostrar Detalle
+                    st.write("### 📄 Detalle por Pliego / Página")
                     df["Página"] = df["Página"].astype(int)
                     st.dataframe(df.style.format({c: "{:.2f}%" for c in df.columns if c != "Página"}), use_container_width=True)
                 
                 st.divider()
 
             except Exception as e:
-                st.error(f"Error técnico: {e}")
+                st.error(f"Error en el proceso: {e}")
