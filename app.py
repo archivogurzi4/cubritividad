@@ -15,6 +15,7 @@ if uploaded_files:
             st.subheader(f"📄 Archivo: {uploaded_file.name}")
             
             try:
+                # Cargamos el documento
                 doc = fitz.open(stream=uploaded_file.read(), filetype="pdf")
                 resultados = []
                 bar = st.progress(0)
@@ -23,41 +24,34 @@ if uploaded_files:
                     page = doc[page_num]
                     fila = {"Página": int(page_num + 1)}
 
-                    # 1. Obtenemos la lista de Pantones (Spot Colors)
+                    # 1. Lista de separaciones técnicas (Pantones)
                     try:
-                        spot_list = page.get_separations() 
-                        # get_separations devuelve una lista de tuplas: (nombre, colorant, tipo, ...)
+                        spot_list = page.get_separations()
                     except:
                         spot_list = []
 
-                    # 2. Definimos las 4 tintas de proceso básicas
+                    # 2. Definimos tintas de proceso
                     procesos = ["Cyan", "Magenta", "Yellow", "Black"]
-                    
-                    # 3. Analizamos cada chapa por separado (Separation ID)
-                    # El estándar de la librería es: 0=C, 1=M, 2=Y, 3=K, 4+=Spots
                     total_chapas = 4 + len(spot_list)
 
                     for i in range(total_chapas):
-                        # Asignamos el nombre correcto a la columna
+                        # Asignamos nombre según el ID de chapa
                         if i < 4:
                             nombre_chapa = procesos[i]
                         else:
-                            nombre_chapa = spot_list[i-4][0] # Nombre del Pantone
+                            nombre_chapa = spot_list[i-4][0]
 
                         try:
-                            # RENDERIZAMOS SOLO ESA CHAPA ESPECÍFICA (Separation i)
-                            # Al usar colorspace=csGRAY y separation=i, obtenemos solo esa película
+                            # Renderizamos SOLO la chapa i (Independencia total)
                             pix = page.get_pixmap(
                                 colorspace=fitz.csGRAY, 
                                 separation=i, 
                                 dpi=72
                             )
-                            
                             img_data = np.frombuffer(pix.samples, dtype=np.uint8)
                             
-                            # En una chapa de separación (escala de grises):
-                            # 255 es el papel (blanco), valores menores son tinta.
-                            # Usamos un umbral de 250 para detectar presencia de punto.
+                            # Medimos presencia de tinta en esa chapa específica
+                            # (Menos de 250 en escala de grises es tinta)
                             area_tinta = np.count_nonzero(img_data < 250)
                             porcentaje = (area_tinta / img_data.size) * 100
                             fila[nombre_chapa] = porcentaje
@@ -67,11 +61,9 @@ if uploaded_files:
                     resultados.append(fila)
                     bar.progress((page_num + 1) / len(doc))
 
-                # --- GENERACIÓN DE REPORTES ---
+                # --- GENERACIÓN DE TABLAS ---
                 if resultados:
                     df = pd.DataFrame(resultados)
-                    
-                    # Aseguramos el orden: Página, C, M, Y, K, y luego los Pantones que aparezcan
                     cols_basicas = ["Página", "Cyan", "Magenta", "Yellow", "Black"]
                     cols_extras = [c for c in df.columns if c not in cols_basicas]
                     
@@ -85,4 +77,9 @@ if uploaded_files:
                     df["Página"] = df["Página"].astype(int)
                     st.dataframe(df.style.format({c: "{:.2f}%" for c in df.columns if c != "Página"}), use_container_width=True)
                 
-                st.divider
+                # Cerramos el bloque de este archivo con un divisor
+                st.divider()
+
+            except Exception as e:
+                # Este es el bloque que faltaba o estaba mal movido
+                st.error(f"Error crítico al analizar el archivo: {e}")
