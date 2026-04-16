@@ -1,4 +1,4 @@
 streamlit
-pymupdf==1.23.0
+pymupdf
 numpy
 pandas
